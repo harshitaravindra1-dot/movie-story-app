@@ -4,8 +4,16 @@ import joblib
 from pathlib import Path
 import random
 
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import linear_kernel
+
+# ==========================================================
+#                     PATHS / DIRECTORIES
+# ==========================================================
+
 BASE_DIR = Path(__file__).resolve().parent
-MODELS_DIR = BASE_DIR / "models"
+DATA_DIR = BASE_DIR / "data"   # <-- your movies.csv is here
+
 
 # ==========================================================
 #           3-WORD STORY GENERATOR (UNIQUE-ISH)
@@ -92,36 +100,78 @@ When they closed the journal, they felt a little lighter.
 Those three simple words – {words_str} – had helped them understand their own thoughts more clearly than any long speech could.
 """.strip()
 
-    # Pick a random scenario each time → uniqueness
+    # Pick a random scenario each time → “unique-ish” stories
     scenario_fn = random.choice([scenario_city, scenario_classroom, scenario_train, scenario_night])
     return scenario_fn()
 
 
 # ==========================================================
-#                MOVIE RECOMMENDER FUNCTIONS
+#           MOVIE RECOMMENDER – AUTO BUILD ON CLOUD
 # ==========================================================
 
 @st.cache_resource
 def load_recommender_artifacts():
     """
-    Load movie dataset and similarity matrix for recommendations.
+    Loads (or builds) the movie data and similarity matrix.
+
+    - If movies_clean.csv & similarity_matrix.pkl exist in /data:
+        → load and return them.
+    - Else:
+        → build them from movies.csv using TF-IDF on title+genres,
+          save them into /data, then return them.
     """
-    movies = pd.read_csv(MODELS_DIR / "movies_clean.csv")
-    similarity_matrix = joblib.load(MODELS_DIR / "similarity_matrix.pkl")
-    movies["title_lower"] = movies["title"].str.lower()
-    return movies, similarity_matrix
+    movies_clean_path = DATA_DIR / "movies_clean.csv"
+    sim_matrix_path = DATA_DIR / "similarity_matrix.pkl"
+
+    # If already built, just load
+    if movies_clean_path.exists() and sim_matrix_path.exists():
+        movies = pd.read_csv(movies_clean_path)
+        sim_matrix = joblib.load(sim_matrix_path)
+        return movies, sim_matrix
+
+    # First-time build (e.g., on Streamlit Cloud)
+    st.write("⏳ Building recommender model for the first time... please wait.")
+
+    # 1. Load original MovieLens movies.csv
+    movies_raw_path = DATA_DIR / "movies.csv"
+    movies = pd.read_csv(movies_raw_path)
+
+    # 2. Basic cleaning
+    movies = movies[["movieId", "title", "genres"]].copy()
+    movies["genres"] = movies["genres"].replace("(no genres listed)", "")
+    movies["combined"] = movies["title"].fillna("") + " " + movies["genres"].fillna("")
+
+    # 3. TF-IDF vectorization
+    tfidf = TfidfVectorizer(stop_words="english")
+    tfidf_matrix = tfidf.fit_transform(movies["combined"])
+
+    # 4. Cosine similarity matrix
+    sim_matrix = linear_kernel(tfidf_matrix, tfidf_matrix)
+
+    # 5. Save artifacts so next time it's fast
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    movies.to_csv(movies_clean_path, index=False)
+    joblib.dump(sim_matrix, sim_matrix_path)
+
+    st.write("✅ Recommender model built successfully!")
+
+    return movies, sim_matrix
 
 
-def recommend_similar(movies, similarity_matrix, title, top_k=5):
+def recommend_similar(movies: pd.DataFrame, similarity_matrix, title: str, top_k: int = 5):
     """
     Recommend similar movies based on cosine similarity matrix.
     """
+    if "title_lower" not in movies.columns:
+        movies["title_lower"] = movies["title"].str.lower()
+
     title_lower = title.lower()
     if title_lower not in movies["title_lower"].values:
         return []
+
     idx = movies.index[movies["title_lower"] == title_lower][0]
     sims = list(enumerate(similarity_matrix[idx]))
-    sims = sorted(sims, key=lambda x: x[1], reverse=True)[1:top_k+1]
+    sims = sorted(sims, key=lambda x: x[1], reverse=True)[1:top_k + 1]
     return [movies.iloc[i]["title"] for i, _ in sims]
 
 
@@ -186,3 +236,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
